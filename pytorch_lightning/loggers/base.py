@@ -1,14 +1,48 @@
+# Copyright The PyTorch Lightning team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Abstract base class used to build new loggers."""
+
 import argparse
 import functools
 import operator
 from abc import ABC, abstractmethod
 from argparse import Namespace
-from typing import Union, Optional, Dict, Iterable, Any, Callable, List, Sequence, Mapping, Tuple
+from functools import wraps
+from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple, Union
+from weakref import ReferenceType
 
 import numpy as np
 import torch
 
+from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
+from pytorch_lightning.core.lightning import LightningModule
 from pytorch_lightning.utilities import rank_zero_only
+
+
+def rank_zero_experiment(fn: Callable) -> Callable:
+    """ Returns the real experiment on rank 0 and otherwise the DummyExperiment. """
+
+    @wraps(fn)
+    def experiment(self):
+
+        @rank_zero_only
+        def get_experiment():
+            return fn(self)
+
+        return get_experiment() or DummyExperiment()
+
+    return experiment
 
 
 class LightningLoggerBase(ABC):
@@ -30,20 +64,28 @@ class LightningLoggerBase(ABC):
     """
 
     def __init__(
-            self,
-            agg_key_funcs: Optional[Mapping[str, Callable[[Sequence[float]], float]]] = None,
-            agg_default_func: Callable[[Sequence[float]], float] = np.mean
+        self,
+        agg_key_funcs: Optional[Mapping[str, Callable[[Sequence[float]], float]]] = None,
+        agg_default_func: Callable[[Sequence[float]], float] = np.mean
     ):
-        self._rank = 0
         self._prev_step: int = -1
         self._metrics_to_agg: List[Dict[str, float]] = []
         self._agg_key_funcs = agg_key_funcs if agg_key_funcs else {}
         self._agg_default_func = agg_default_func
 
+    def after_save_checkpoint(self, checkpoint_callback: 'ReferenceType[ModelCheckpoint]') -> None:
+        """
+        Called after model checkpoint callback saves a new checkpoint
+
+        Args:
+            model_checkpoint: the model checkpoint callback instance
+        """
+        pass
+
     def update_agg_funcs(
-            self,
-            agg_key_funcs: Optional[Mapping[str, Callable[[Sequence[float]], float]]] = None,
-            agg_default_func: Callable[[Sequence[float]], float] = np.mean
+        self,
+        agg_key_funcs: Optional[Mapping[str, Callable[[Sequence[float]], float]]] = None,
+        agg_default_func: Callable[[Sequence[float]], float] = np.mean
     ):
         """
         Update aggregation methods.
@@ -67,9 +109,9 @@ class LightningLoggerBase(ABC):
     def experiment(self) -> Any:
         """Return the experiment object associated with this logger."""
 
-    def _aggregate_metrics(
-            self, metrics: Dict[str, float], step: Optional[int] = None
-    ) -> Tuple[int, Optional[Dict[str, float]]]:
+    def _aggregate_metrics(self,
+                           metrics: Dict[str, float],
+                           step: Optional[int] = None) -> Tuple[int, Optional[Dict[str, float]]]:
         """
         Aggregates metrics.
 
@@ -125,7 +167,7 @@ class LightningLoggerBase(ABC):
         """
         agg_step, metrics_to_log = self._aggregate_metrics(metrics=metrics, step=step)
 
-        if metrics_to_log is not None:
+        if metrics_to_log:
             self.log_metrics(metrics=metrics_to_log, step=agg_step)
 
     @abstractmethod
@@ -154,7 +196,34 @@ class LightningLoggerBase(ABC):
         return params
 
     @staticmethod
-    def _flatten_dict(params: Dict[str, Any], delimiter: str = '/') -> Dict[str, Any]:
+    def _sanitize_callable_params(params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Sanitize callable params dict, e.g. ``{'a': <function_**** at 0x****>} -> {'a': 'function_****'}``.
+
+        Args:
+            params: Dictionary containing the hyperparameters
+
+        Returns:
+            dictionary with all callables sanitized
+        """
+
+        def _sanitize_callable(val):
+            # Give them one chance to return a value. Don't go rabbit hole of recursive call
+            if isinstance(val, Callable):
+                try:
+                    _val = val()
+                    if isinstance(_val, Callable):
+                        return val.__name__
+                    return _val
+                # todo: specify the possible exception
+                except Exception:
+                    return getattr(val, "__name__", None)
+            return val
+
+        return {key: _sanitize_callable(val) for key, val in params.items()}
+
+    @staticmethod
+    def _flatten_dict(params: Dict[Any, Any], delimiter: str = '/') -> Dict[str, Any]:
         """
         Flatten hierarchical dict, e.g. ``{'a': {'b': 'c'}} -> {'a/b': 'c'}``.
 
@@ -170,13 +239,16 @@ class LightningLoggerBase(ABC):
             {'a/b': 'c'}
             >>> LightningLoggerBase._flatten_dict({'a': {'b': 123}})
             {'a/b': 123}
+            >>> LightningLoggerBase._flatten_dict({5: {'a': 123}})
+            {'5/a': 123}
         """
 
         def _dict_generator(input_dict, prefixes=None):
             prefixes = prefixes[:] if prefixes else []
-            if isinstance(input_dict, dict):
+            if isinstance(input_dict, MutableMapping):
                 for key, value in input_dict.items():
-                    if isinstance(value, (dict, Namespace)):
+                    key = str(key)
+                    if isinstance(value, (MutableMapping, Namespace)):
                         value = vars(value) if isinstance(value, Namespace) else value
                         for d in _dict_generator(value, prefixes + [key]):
                             yield d
@@ -209,16 +281,34 @@ class LightningLoggerBase(ABC):
          'namespace': 'Namespace(foo=3)',
          'string': 'abc'}
         """
-        return {k: v if type(v) in [bool, int, float, str, torch.Tensor] else str(v) for k, v in params.items()}
+        for k in params.keys():
+            # convert relevant np scalars to python types first (instead of str)
+            if isinstance(params[k], (np.bool_, np.integer, np.floating)):
+                params[k] = params[k].item()
+            elif type(params[k]) not in [bool, int, float, str, torch.Tensor]:
+                params[k] = str(params[k])
+        return params
 
     @abstractmethod
-    def log_hyperparams(self, params: argparse.Namespace):
+    def log_hyperparams(self, params: argparse.Namespace, *args, **kwargs):
         """
         Record hyperparameters.
 
         Args:
             params: :class:`~argparse.Namespace` containing the hyperparameters
+            args: Optional positional arguments, depends on the specific logger being used
+            kwargs: Optional keywoard arguments, depends on the specific logger being used
         """
+
+    def log_graph(self, model: LightningModule, input_array=None) -> None:
+        """
+        Record model graph
+
+        Args:
+            model: lightning model
+            input_array: input passes to `model.forward`
+        """
+        pass
 
     def save(self) -> None:
         """Save log data."""
@@ -238,6 +328,14 @@ class LightningLoggerBase(ABC):
         self.save()
 
     @property
+    def save_dir(self) -> Optional[str]:
+        """
+        Return the root directory where experiment logs get saved, or `None` if the logger does not
+        save data locally.
+        """
+        return None
+
+    @property
     @abstractmethod
     def name(self) -> str:
         """Return the experiment name."""
@@ -246,6 +344,12 @@ class LightningLoggerBase(ABC):
     @abstractmethod
     def version(self) -> Union[int, str]:
         """Return the experiment version."""
+
+    def _add_prefix(self, metrics: Dict[str, float]):
+        if self._prefix:
+            metrics = {f'{self._prefix}{self.LOGGER_JOIN_CHAR}{k}': v for k, v in metrics.items()}
+
+        return metrics
 
 
 class LoggerCollection(LightningLoggerBase):
@@ -264,24 +368,54 @@ class LoggerCollection(LightningLoggerBase):
     def __getitem__(self, index: int) -> LightningLoggerBase:
         return [logger for logger in self._logger_iterable][index]
 
+    def after_save_checkpoint(self, checkpoint_callback: 'ReferenceType[ModelCheckpoint]') -> None:
+        for logger in self._logger_iterable:
+            logger.after_save_checkpoint(checkpoint_callback)
+
+    def update_agg_funcs(
+        self,
+        agg_key_funcs: Optional[Mapping[str, Callable[[Sequence[float]], float]]] = None,
+        agg_default_func: Callable[[Sequence[float]], float] = np.mean
+    ):
+        for logger in self._logger_iterable:
+            logger.update_agg_funcs(agg_key_funcs, agg_default_func)
+
     @property
     def experiment(self) -> List[Any]:
         return [logger.experiment for logger in self._logger_iterable]
 
+    def agg_and_log_metrics(self, metrics: Dict[str, float], step: Optional[int] = None):
+        for logger in self._logger_iterable:
+            logger.agg_and_log_metrics(metrics, step)
+
     def log_metrics(self, metrics: Dict[str, float], step: Optional[int] = None) -> None:
-        [logger.log_metrics(metrics, step) for logger in self._logger_iterable]
+        for logger in self._logger_iterable:
+            logger.log_metrics(metrics, step)
 
     def log_hyperparams(self, params: Union[Dict[str, Any], Namespace]) -> None:
-        [logger.log_hyperparams(params) for logger in self._logger_iterable]
+        for logger in self._logger_iterable:
+            logger.log_hyperparams(params)
+
+    def log_graph(self, model: LightningModule, input_array=None) -> None:
+        for logger in self._logger_iterable:
+            logger.log_graph(model, input_array)
 
     def save(self) -> None:
-        [logger.save() for logger in self._logger_iterable]
+        for logger in self._logger_iterable:
+            logger.save()
 
     def finalize(self, status: str) -> None:
-        [logger.finalize(status) for logger in self._logger_iterable]
+        for logger in self._logger_iterable:
+            logger.finalize(status)
 
     def close(self) -> None:
-        [logger.close() for logger in self._logger_iterable]
+        for logger in self._logger_iterable:
+            logger.close()
+
+    @property
+    def save_dir(self) -> Optional[str]:
+        # Checkpoints should be saved to default / chosen location when using multiple loggers
+        return None
 
     @property
     def name(self) -> str:
@@ -292,10 +426,57 @@ class LoggerCollection(LightningLoggerBase):
         return '_'.join([str(logger.version) for logger in self._logger_iterable])
 
 
+class DummyExperiment(object):
+    """ Dummy experiment """
+
+    def nop(*args, **kw):
+        pass
+
+    def __getattr__(self, _):
+        return self.nop
+
+    def __getitem__(self, idx) -> "DummyExperiment":
+        # enables self.logger.experiment[0].add_image(...)
+        return self
+
+
+class DummyLogger(LightningLoggerBase):
+    """
+    Dummy logger for internal use. It is useful if we want to disable user's
+    logger for a feature, but still ensure that user code can run
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._experiment = DummyExperiment()
+
+    @property
+    def experiment(self) -> DummyExperiment:
+        return self._experiment
+
+    def log_metrics(self, *args, **kwargs) -> None:
+        pass
+
+    def log_hyperparams(self, *args, **kwargs) -> None:
+        pass
+
+    @property
+    def name(self) -> str:
+        return ""
+
+    @property
+    def version(self) -> str:
+        return ""
+
+    def __getitem__(self, idx) -> "DummyLogger":
+        # enables self.logger[0].experiment.add_image(...)
+        return self
+
+
 def merge_dicts(
-        dicts: Sequence[Mapping],
-        agg_key_funcs: Optional[Mapping[str, Callable[[Sequence[float]], float]]] = None,
-        default_func: Callable[[Sequence[float]], float] = np.mean
+    dicts: Sequence[Mapping],
+    agg_key_funcs: Optional[Mapping[str, Callable[[Sequence[float]], float]]] = None,
+    default_func: Callable[[Sequence[float]], float] = np.mean
 ) -> Dict:
     """
     Merge a sequence with dictionaries into one dictionary by aggregating the

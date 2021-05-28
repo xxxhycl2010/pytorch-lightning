@@ -13,10 +13,10 @@ test_tube_data/
 test_tube_exp/
 
 # Documentations
-docs/source/pl_examples*.rst
-docs/source/pytorch_lightning*.rst
-docs/source/tests*.rst
+docs/source/api
 docs/source/*.md
+docs/source/generated
+docs/source/*/generated
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -28,12 +28,14 @@ timit_data/
 # C extensions
 *.so
 
+# PyCharm
 .idea/
 
 # Distribution / packaging
 .Python
 ide_layouts/
 build/
+_build/
 develop-eggs/
 dist/
 downloads/
@@ -126,13 +128,33 @@ ENV/
 
 # mypy
 .mypy_cache/
+# pytest
+.pytest_cache/
 
 # data
 .data/
-datasets/
+Datasets/
 mnist/
+legacy/checkpoints/
 
 # pl tests
 ml-runs/
+mlruns/
 *.zip
+*.ckpt
 pytorch\ lightning
+test-reports/
+wandb
+.forked/
+*.prof
+*.tar.gz
+
+# dataset generated from bolts in examples.
+cifar-10-batches-py
+*.pt
+# ctags
+tags
+data
+MNIST
+runs
+*trace*

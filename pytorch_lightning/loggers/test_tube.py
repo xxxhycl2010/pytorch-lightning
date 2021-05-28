@@ -1,46 +1,66 @@
+# Copyright The PyTorch Lightning team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
-Test Tube
----------
+Test Tube Logger
+----------------
 """
 from argparse import Namespace
-from typing import Optional, Dict, Any, Union
+from typing import Any, Dict, Optional, Union
 
-try:
+from pytorch_lightning.core.lightning import LightningModule
+from pytorch_lightning.loggers.base import LightningLoggerBase, rank_zero_experiment
+from pytorch_lightning.utilities import _module_available
+from pytorch_lightning.utilities.distributed import rank_zero_only, rank_zero_warn
+
+_TESTTUBE_AVAILABLE = _module_available("test_tube")
+
+if _TESTTUBE_AVAILABLE:
     from test_tube import Experiment
-except ImportError:  # pragma: no-cover
-    raise ImportError('You want to use `test_tube` logger which is not installed yet,'  # pragma: no-cover
-                      ' install it with `pip install test-tube`.')
-
-from pytorch_lightning.loggers.base import LightningLoggerBase
-from pytorch_lightning.utilities.distributed import rank_zero_only
+else:
+    Experiment = None
 
 
 class TestTubeLogger(LightningLoggerBase):
     r"""
     Log to local file system in `TensorBoard <https://www.tensorflow.org/tensorboard>`_ format
     but using a nicer folder structure (see `full docs <https://williamfalcon.github.io/test-tube>`_).
+
     Install it with pip:
 
     .. code-block:: bash
 
         pip install test_tube
 
-    Example:
-        >>> from pytorch_lightning import Trainer
-        >>> from pytorch_lightning.loggers import TestTubeLogger
-        >>> logger = TestTubeLogger("tt_logs", name="my_exp_name")
-        >>> trainer = Trainer(logger=logger)
+    .. code-block:: python
+
+        from pytorch_lightning import Trainer
+        from pytorch_lightning.loggers import TestTubeLogger
+        logger = TestTubeLogger("tt_logs", name="my_exp_name")
+        trainer = Trainer(logger=logger)
 
     Use the logger anywhere in your :class:`~pytorch_lightning.core.lightning.LightningModule` as follows:
 
-    >>> from pytorch_lightning import LightningModule
-    >>> class LitModel(LightningModule):
-    ...     def training_step(self, batch, batch_idx):
-    ...         # example
-    ...         self.logger.experiment.whatever_method_summary_writer_supports(...)
-    ...
-    ...     def any_lightning_module_function_or_hook(self):
-    ...         self.logger.experiment.add_histogram(...)
+    .. code-block:: python
+
+        from pytorch_lightning import LightningModule
+        class LitModel(LightningModule):
+            def training_step(self, batch, batch_idx):
+                # example
+                self.logger.experiment.whatever_method_summary_writer_supports(...)
+
+            def any_lightning_module_function_or_hook(self):
+                self.logger.experiment.add_histogram(...)
 
     Args:
         save_dir: Save directory
@@ -50,28 +70,48 @@ class TestTubeLogger(LightningLoggerBase):
         version: Experiment version. If version is not specified the logger inspects the save
             directory for existing versions, then automatically assigns the next available version.
         create_git_tag: If ``True`` creates a git tag to save the code used in this experiment.
+        log_graph: Adds the computational graph to tensorboard. This requires that
+            the user has defined the `self.example_input_array` attribute in their
+            model.
+        prefix: A string to put at the beginning of metric keys.
 
+    Raises:
+        ImportError:
+            If required TestTube package is not installed on the device.
     """
 
     __test__ = False
+    LOGGER_JOIN_CHAR = '-'
 
-    def __init__(self,
-                 save_dir: str,
-                 name: str = "default",
-                 description: Optional[str] = None,
-                 debug: bool = False,
-                 version: Optional[int] = None,
-                 create_git_tag: bool = False):
+    def __init__(
+        self,
+        save_dir: str,
+        name: str = "default",
+        description: Optional[str] = None,
+        debug: bool = False,
+        version: Optional[int] = None,
+        create_git_tag: bool = False,
+        log_graph: bool = False,
+        prefix: str = '',
+    ):
+        if Experiment is None:
+            raise ImportError(
+                'You want to use `test_tube` logger which is not installed yet,'
+                ' install it with `pip install test-tube`.'
+            )
         super().__init__()
-        self.save_dir = save_dir
+        self._save_dir = save_dir
         self._name = name
         self.description = description
         self.debug = debug
         self._version = version
         self.create_git_tag = create_git_tag
+        self._log_graph = log_graph
+        self._prefix = prefix
         self._experiment = None
 
     @property
+    @rank_zero_experiment
     def experiment(self) -> Experiment:
         r"""
 
@@ -108,8 +148,24 @@ class TestTubeLogger(LightningLoggerBase):
     @rank_zero_only
     def log_metrics(self, metrics: Dict[str, float], step: Optional[int] = None) -> None:
         # TODO: HACK figure out where this is being set to true
+        metrics = self._add_prefix(metrics)
         self.experiment.debug = self.debug
         self.experiment.log(metrics, global_step=step)
+
+    @rank_zero_only
+    def log_graph(self, model: LightningModule, input_array=None):
+        if self._log_graph:
+            if input_array is None:
+                input_array = model.example_input_array
+
+            if input_array is not None:
+                self.experiment.add_graph(model, model._apply_batch_transfer_handler(input_array))
+            else:
+                rank_zero_warn(
+                    'Could not log computational graph since neither the'
+                    ' `model.example_input_array` attribute is set nor'
+                    ' `input_array` was given', UserWarning
+                )
 
     @rank_zero_only
     def save(self) -> None:
@@ -136,18 +192,22 @@ class TestTubeLogger(LightningLoggerBase):
             exp.close()
 
     @property
+    def save_dir(self) -> Optional[str]:
+        return self._save_dir
+
+    @property
     def name(self) -> str:
         if self._experiment is None:
             return self._name
-        else:
-            return self.experiment.name
+
+        return self.experiment.name
 
     @property
     def version(self) -> int:
         if self._experiment is None:
             return self._version
-        else:
-            return self.experiment.version
+
+        return self.experiment.version
 
     # Test tube experiments are not pickleable, so we need to override a few
     # methods to get DDP working. See

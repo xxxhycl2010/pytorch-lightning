@@ -12,23 +12,28 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 
-import os
-import sys
-import glob
-import shutil
-import inspect
-
 # import m2r
-import builtins
+import glob
+import os
+import shutil
+import sys
+from importlib.util import module_from_spec, spec_from_file_location
+
 import pt_lightning_sphinx_theme
 
 PATH_HERE = os.path.abspath(os.path.dirname(__file__))
 PATH_ROOT = os.path.join(PATH_HERE, '..', '..')
 sys.path.insert(0, os.path.abspath(PATH_ROOT))
 
-builtins.__LIGHTNING_SETUP__ = True
+FOLDER_GENERATED = 'generated'
+SPHINX_MOCK_REQUIREMENTS = int(os.environ.get('SPHINX_MOCK_REQUIREMENTS', True))
 
-import pytorch_lightning  # noqa: E402
+spec = spec_from_file_location(
+    "pytorch_lightning/__about__.py",
+    os.path.join(PATH_ROOT, "pytorch_lightning", "__about__.py"),
+)
+about = module_from_spec(spec)
+spec.loader.exec_module(about)
 
 # -- Project documents -------------------------------------------------------
 
@@ -48,25 +53,48 @@ import pytorch_lightning  # noqa: E402
 # with open('readme.md', 'w') as fp:
 #     fp.write(readme)
 
+
+def _transform_changelog(path_in: str, path_out: str) -> None:
+    with open(path_in, 'r') as fp:
+        chlog_lines = fp.readlines()
+    # enrich short subsub-titles to be unique
+    chlog_ver = ''
+    for i, ln in enumerate(chlog_lines):
+        if ln.startswith('## '):
+            chlog_ver = ln[2:].split('-')[0].strip()
+        elif ln.startswith('### '):
+            ln = ln.replace('###', f'### {chlog_ver} -')
+            chlog_lines[i] = ln
+    with open(path_out, 'w') as fp:
+        fp.writelines(chlog_lines)
+
+
+os.makedirs(os.path.join(PATH_HERE, FOLDER_GENERATED), exist_ok=True)
+# copy all documents from GH templates like contribution guide
 for md in glob.glob(os.path.join(PATH_ROOT, '.github', '*.md')):
-    shutil.copy(md, os.path.join(PATH_HERE, os.path.basename(md)))
+    shutil.copy(md, os.path.join(PATH_HERE, FOLDER_GENERATED, os.path.basename(md)))
+# copy also the changelog
+_transform_changelog(
+    os.path.join(PATH_ROOT, 'CHANGELOG.md'),
+    os.path.join(PATH_HERE, FOLDER_GENERATED, 'CHANGELOG.md'),
+)
 
 # -- Project information -----------------------------------------------------
 
-project = 'PyTorch-Lightning'
-copyright = pytorch_lightning.__copyright__
-author = pytorch_lightning.__author__
+project = 'PyTorch Lightning'
+copyright = about.__copyright__
+author = about.__author__
 
 # The short X.Y version
-version = pytorch_lightning.__version__
+version = about.__version__
 # The full version, including alpha/beta/rc tags
-release = pytorch_lightning.__version__
+release = about.__version__
 
 # -- General configuration ---------------------------------------------------
 
 # If your documentation needs a minimal Sphinx version, state it here.
 
-needs_sphinx = '2.0'
+needs_sphinx = '4.0'
 
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
@@ -79,15 +107,18 @@ extensions = [
     'sphinx.ext.intersphinx',
     'sphinx.ext.todo',
     'sphinx.ext.coverage',
-    'sphinx.ext.linkcode',
+    'sphinx.ext.viewcode',
     'sphinx.ext.autosummary',
     'sphinx.ext.napoleon',
+    'sphinx.ext.imgmath',
     'recommonmark',
     'sphinx.ext.autosectionlabel',
     # 'm2r',
-    'nbsphinx',
+    # 'nbsphinx',  # it seems some sphinx issue
     'sphinx_autodoc_typehints',
+    'sphinx_copybutton',
     'sphinx_paramlinks',
+    'sphinx_togglebutton',
 ]
 
 # Add any paths that contain templates here, relative to this directory.
@@ -127,18 +158,7 @@ language = None
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
 exclude_patterns = [
-    'pytorch_lightning.rst',
-    'pl_examples.*',
-    'modules.rst',
-
-    # deprecated/renamed:
-    'pytorch_lightning.loggers.comet_logger.rst',           # TODO: remove in v0.8.0
-    'pytorch_lightning.loggers.mlflow_logger.rst',          # TODO: remove in v0.8.0
-    'pytorch_lightning.loggers.test_tube_logger.rst',       # TODO: remove in v0.8.0
-    'pytorch_lightning.callbacks.pt_callbacks.*',           # TODO: remove in v0.8.0
-    'pytorch_lightning.pt_overrides.*',                     # TODO: remove in v0.8.0
-    'pytorch_lightning.root_module.*',                      # TODO: remove in v0.8.0
-    'pytorch_lightning.logging.*',                          # TODO: remove in v0.8.0
+    f'{FOLDER_GENERATED}/PULL_REQUEST_TEMPLATE.md',
 ]
 
 # The name of the Pygments (syntax highlighting) style to use.
@@ -159,19 +179,21 @@ html_theme_path = [pt_lightning_sphinx_theme.get_html_theme_path()]
 # documentation.
 
 html_theme_options = {
-    'pytorch_project': pytorch_lightning.__homepage__,
-    'canonical_url': pytorch_lightning.__homepage__,
+    'pytorch_project': 'https://pytorchlightning.ai',
+    'canonical_url': about.__docs_url__,
     'collapse_navigation': False,
     'display_version': True,
     'logo_only': False,
 }
 
-html_logo = '_images/logos/lightning_logo-name.svg'
+html_logo = '_static/images/logo.svg'
+
+html_favicon = '_static/images/icon.svg'
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
-html_static_path = ['_images', '_templates']
+html_static_path = ['_templates', '_static']
 
 # Custom sidebar templates, must be a dictionary that maps document names
 # to template names.
@@ -182,7 +204,6 @@ html_static_path = ['_images', '_templates']
 # 'searchbox.html']``.
 #
 # html_sidebars = {}
-
 
 # -- Options for HTMLHelp output ---------------------------------------------
 
@@ -216,9 +237,7 @@ latex_documents = [
 
 # One entry per manual page. List of tuples
 # (source start file, name, description, authors, manual section).
-man_pages = [
-    (master_doc, project, project + ' Documentation', [author], 1)
-]
+man_pages = [(master_doc, project, project + ' Documentation', [author], 1)]
 
 # -- Options for Texinfo output ----------------------------------------------
 
@@ -226,8 +245,15 @@ man_pages = [
 # (source start file, target name, title, author,
 #  dir menu entry, description, category)
 texinfo_documents = [
-    (master_doc, project, project + ' Documentation', author, project,
-     'One line description of project.', 'Miscellaneous'),
+    (
+        master_doc,
+        project,
+        project + ' Documentation',
+        author,
+        project,
+        'One line description of project.',
+        'Miscellaneous',
+    ),
 ]
 
 # -- Options for Epub output -------------------------------------------------
@@ -254,8 +280,9 @@ epub_exclude_files = ['search.html']
 intersphinx_mapping = {
     'python': ('https://docs.python.org/3', None),
     'torch': ('https://pytorch.org/docs/stable/', None),
-    'numpy': ('https://docs.scipy.org/doc/numpy/', None),
+    'numpy': ('https://numpy.org/doc/stable/', None),
     'PIL': ('https://pillow.readthedocs.io/en/stable/', None),
+    'torchmetrics': ('https://torchmetrics.readthedocs.io/en/stable/', None),
 }
 
 # -- Options for todo extension ----------------------------------------------
@@ -263,132 +290,73 @@ intersphinx_mapping = {
 # If true, `todo` and `todoList` produce output, else they produce nothing.
 todo_include_todos = True
 
-# https://github.com/rtfd/readthedocs.org/issues/1139
-# I use sphinx-apidoc to auto-generate API documentation for my project.
-# Right now I have to commit these auto-generated files to my repository
-# so that RTD can build them into HTML docs. It'd be cool if RTD could run
-# sphinx-apidoc for me, since it's easy to forget to regen API docs
-# and commit them to my repo after making changes to my code.
-
-PACKAGES = [
-    pytorch_lightning.__name__,
-    'pl_examples',
-]
-
-
-def run_apidoc(_):
-    for pkg in PACKAGES:
-        argv = ['-e', '-o', PATH_HERE, os.path.join(PATH_HERE, PATH_ROOT, pkg),
-                '**/test_*', '--force', '--private', '--module-first']
-        try:
-            # Sphinx 1.7+
-            from sphinx.ext import apidoc
-            apidoc.main(argv)
-        except ImportError:
-            # Sphinx 1.6 (and earlier)
-            from sphinx import apidoc
-            argv.insert(0, apidoc.__file__)
-            apidoc.main(argv)
-
 
 def setup(app):
-    app.connect('builder-inited', run_apidoc)
+    # this is for hiding doctest decoration,
+    # see: http://z4r.github.io/python/2011/12/02/hides-the-prompts-and-output/
+    app.add_js_file('copybutton.js')
+    app.add_css_file('main.css')
 
 
 # copy all notebooks to local folder
-path_nbs = os.path.join(PATH_HERE, 'notebooks')
-if not os.path.isdir(path_nbs):
-    os.mkdir(path_nbs)
-for path_ipynb in glob.glob(os.path.join(PATH_ROOT, 'notebooks', '*.ipynb')):
-    path_ipynb2 = os.path.join(path_nbs, os.path.basename(path_ipynb))
-    shutil.copy(path_ipynb, path_ipynb2)
+# path_nbs = os.path.join(PATH_HERE, 'notebooks')
+# if not os.path.isdir(path_nbs):
+#     os.mkdir(path_nbs)
+# for path_ipynb in glob.glob(os.path.join(PATH_ROOT, 'notebooks', '*.ipynb')):
+#     path_ipynb2 = os.path.join(path_nbs, os.path.basename(path_ipynb))
+#     shutil.copy(path_ipynb, path_ipynb2)
+
 
 # Ignoring Third-party packages
 # https://stackoverflow.com/questions/15889621/sphinx-how-to-exclude-imports-in-automodule
-
-MOCK_REQUIRE_PACKAGES = []
-with open(os.path.join(PATH_ROOT, 'requirements.txt'), 'r') as fp:
-    for ln in fp.readlines():
-        found = [ln.index(ch) for ch in list(',=<>#') if ch in ln]
-        pkg = ln[:min(found)] if found else ln
-        if pkg.rstrip():
-            MOCK_REQUIRE_PACKAGES.append(pkg.rstrip())
-
-# TODO: better parse from package since the import name and package name may differ
-MOCK_MANUAL_PACKAGES = [
-    'torch',
-    'torchvision',
-    'PIL',
-    'test_tube',
-    'mlflow',
-    'comet_ml',
-    'wandb',
-    'neptune',
-    'trains',
-]
-autodoc_mock_imports = MOCK_REQUIRE_PACKAGES + MOCK_MANUAL_PACKAGES
-# for mod_name in MOCK_REQUIRE_PACKAGES:
-#     sys.modules[mod_name] = mock.Mock()
+def package_list_from_file(file):
+    """List up package name (not containing version and extras) from a package list file
+    """
+    mocked_packages = []
+    with open(file, 'r') as fp:
+        for ln in fp.readlines():
+            # Example: `tqdm>=4.41.0` => `tqdm`
+            # `[` is for package with extras
+            found = [ln.index(ch) for ch in list(',=<>#[') if ch in ln]
+            pkg = ln[:min(found)] if found else ln
+            if pkg.rstrip():
+                mocked_packages.append(pkg.rstrip())
+    return mocked_packages
 
 
-# Options for the linkcode extension
-# ----------------------------------
-github_user = 'PyTorchLightning'
-github_repo = project
+# define mapping from PyPI names to python imports
+PACKAGE_MAPPING = {
+    'Pillow': 'PIL',
+    'opencv-python': 'cv2',
+    'PyYAML': 'yaml',
+    'comet-ml': 'comet_ml',
+    'neptune-client': 'neptune',
+    'hydra-core': 'hydra',
+    'pyDeprecate': 'deprecate',
+}
+MOCK_PACKAGES = []
+if SPHINX_MOCK_REQUIREMENTS:
+    MOCK_PACKAGES += ['fairscale']
+    # mock also base packages when we are on RTD since we don't install them there
+    MOCK_PACKAGES += package_list_from_file(os.path.join(PATH_ROOT, 'requirements.txt'))
+    MOCK_PACKAGES += package_list_from_file(os.path.join(PATH_ROOT, 'requirements', 'extra.txt'))
+    MOCK_PACKAGES += package_list_from_file(os.path.join(PATH_ROOT, 'requirements', 'loggers.txt'))
+MOCK_PACKAGES = [PACKAGE_MAPPING.get(pkg, pkg) for pkg in MOCK_PACKAGES]
 
+autodoc_mock_imports = MOCK_PACKAGES
 
-# Resolve function
-# This function is used to populate the (source) links in the API
-def linkcode_resolve(domain, info):
-    def find_source():
-        # try to find the file and line number, based on code from numpy:
-        # https://github.com/numpy/numpy/blob/master/doc/source/conf.py#L286
-        obj = sys.modules[info['module']]
-        for part in info['fullname'].split('.'):
-            obj = getattr(obj, part)
-        fname = inspect.getsourcefile(obj)
-        # https://github.com/rtfd/readthedocs.org/issues/5735
-        if any([s in fname for s in ('readthedocs', 'rtfd', 'checkouts')]):
-            # /home/docs/checkouts/readthedocs.org/user_builds/pytorch_lightning/checkouts/
-            #  devel/pytorch_lightning/utilities/cls_experiment.py#L26-L176
-            path_top = os.path.abspath(os.path.join('..', '..', '..'))
-            fname = os.path.relpath(fname, start=path_top)
-        else:
-            # Local build, imitate master
-            fname = 'master/' + os.path.relpath(fname, start=os.path.abspath('..'))
-        source, lineno = inspect.getsourcelines(obj)
-        return fname, lineno, lineno + len(source) - 1
-
-    if domain != 'py' or not info['module']:
-        return None
-    try:
-        filename = '%s#L%d-L%d' % find_source()
-    except Exception:
-        filename = info['module'].replace('.', '/') + '.py'
-    # import subprocess
-    # tag = subprocess.Popen(['git', 'rev-parse', 'HEAD'], stdout=subprocess.PIPE,
-    #                        universal_newlines=True).communicate()[0][:-1]
-    branch = filename.split('/')[0]
-    # do mapping from latest tags to master
-    branch = {'latest': 'master', 'stable': 'master'}.get(branch, branch)
-    filename = '/'.join([branch] + filename.split('/')[1:])
-    return "https://github.com/%s/%s/blob/%s" \
-           % (github_user, github_repo, filename)
-
+autosummary_generate = True
 
 autodoc_member_order = 'groupwise'
+
 autoclass_content = 'both'
-# the options are fixed and will be soon in release,
-#  see https://github.com/sphinx-doc/sphinx/issues/5459
+
 autodoc_default_options = {
-    'members': None,
-    'methods': None,
-    # 'attributes': None,
+    'members': True,
+    'methods': True,
     'special-members': '__call__',
     'exclude-members': '_abc_impl',
     'show-inheritance': True,
-    'private-members': True,
-    'noindex': True,
 }
 
 # Sphinx will add “permalinks” for each heading and description environment as paragraph signs that
@@ -396,10 +364,33 @@ autodoc_default_options = {
 # This value determines the text for the permalink; it defaults to "¶". Set it to None or the empty
 #  string to disable permalinks.
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#confval-html_add_permalinks
-html_add_permalinks = "¶"
+html_permalinks = True
+html_permalinks_icon = "¶"
 
 # True to prefix each section label with the name of the document it is in, followed by a colon.
 #  For example, index:Introduction for a section called Introduction that appears in document index.rst.
 #  Useful for avoiding ambiguity when the same section heading appears in different documents.
 # http://www.sphinx-doc.org/en/master/usage/extensions/autosectionlabel.html
 autosectionlabel_prefix_document = True
+
+# only run doctests marked with a ".. doctest::" directive
+doctest_test_doctest_blocks = ''
+doctest_global_setup = """
+import importlib
+import os
+from typing import Optional
+import torch
+from torch import nn
+import pytorch_lightning as pl
+from pytorch_lightning import LightningDataModule, LightningModule, Trainer
+from pytorch_lightning.utilities import (
+    _NATIVE_AMP_AVAILABLE,
+    _APEX_AVAILABLE,
+    _XLA_AVAILABLE,
+    _TPU_AVAILABLE,
+    _TORCHVISION_AVAILABLE,
+    _module_available,
+)
+_JSONARGPARSE_AVAILABLE = _module_available("jsonargparse")
+"""
+coverage_skip_undoc_in_source = True

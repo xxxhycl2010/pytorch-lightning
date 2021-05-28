@@ -1,264 +1,270 @@
-import tests.base.utils as tutils
-from pytorch_lightning import Callback
-from pytorch_lightning import Trainer, LightningModule
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
-from tests.base import (
-    LightTrainDataloader,
-    LightTestMixin,
-    LightValidationMixin,
-    TestModelBase
-)
+# Copyright The PyTorch Lightning team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+from unittest import mock
+from unittest.mock import ANY, call, MagicMock, Mock
+
+from pytorch_lightning import Trainer
+from tests.helpers import BoringModel
 
 
-def test_trainer_callback_system(tmpdir):
-    """Test the callback system."""
+@mock.patch("torch.save")  # need to mock torch.save or we get pickle error
+def test_trainer_callback_hook_system_fit(_, tmpdir):
+    """Test the callback hook system for fit."""
 
-    class CurrentTestModel(
-        LightTrainDataloader,
-        LightTestMixin,
-        LightValidationMixin,
-        TestModelBase,
-    ):
-        pass
-
-    hparams = tutils.get_default_hparams()
-    model = CurrentTestModel(hparams)
-
-    def _check_args(trainer, pl_module):
-        assert isinstance(trainer, Trainer)
-        assert isinstance(pl_module, LightningModule)
-
-    class TestCallback(Callback):
-        def __init__(self):
-            super().__init__()
-            self.on_init_start_called = False
-            self.on_init_end_called = False
-            self.on_sanity_check_start_called = False
-            self.on_sanity_check_end_called = False
-            self.on_epoch_start_called = False
-            self.on_epoch_end_called = False
-            self.on_batch_start_called = False
-            self.on_batch_end_called = False
-            self.on_validation_batch_start_called = False
-            self.on_validation_batch_end_called = False
-            self.on_test_batch_start_called = False
-            self.on_test_batch_end_called = False
-            self.on_train_start_called = False
-            self.on_train_end_called = False
-            self.on_validation_start_called = False
-            self.on_validation_end_called = False
-            self.on_test_start_called = False
-            self.on_test_end_called = False
-
-        def on_init_start(self, trainer):
-            assert isinstance(trainer, Trainer)
-            self.on_init_start_called = True
-
-        def on_init_end(self, trainer):
-            assert isinstance(trainer, Trainer)
-            self.on_init_end_called = True
-
-        def on_sanity_check_start(self, trainer, pl_module):
-            _check_args(trainer, pl_module)
-            self.on_sanity_check_start_called = True
-
-        def on_sanity_check_end(self, trainer, pl_module):
-            _check_args(trainer, pl_module)
-            self.on_sanity_check_end_called = True
-
-        def on_epoch_start(self, trainer, pl_module):
-            _check_args(trainer, pl_module)
-            self.on_epoch_start_called = True
-
-        def on_epoch_end(self, trainer, pl_module):
-            _check_args(trainer, pl_module)
-            self.on_epoch_end_called = True
-
-        def on_batch_start(self, trainer, pl_module):
-            _check_args(trainer, pl_module)
-            self.on_batch_start_called = True
-
-        def on_batch_end(self, trainer, pl_module):
-            _check_args(trainer, pl_module)
-            self.on_batch_end_called = True
-
-        def on_validation_batch_start(self, trainer, pl_module):
-            _check_args(trainer, pl_module)
-            self.on_validation_batch_start_called = True
-
-        def on_validation_batch_end(self, trainer, pl_module):
-            _check_args(trainer, pl_module)
-            self.on_validation_batch_end_called = True
-
-        def on_test_batch_start(self, trainer, pl_module):
-            _check_args(trainer, pl_module)
-            self.on_test_batch_start_called = True
-
-        def on_test_batch_end(self, trainer, pl_module):
-            _check_args(trainer, pl_module)
-            self.on_test_batch_end_called = True
-
-        def on_train_start(self, trainer, pl_module):
-            _check_args(trainer, pl_module)
-            self.on_train_start_called = True
-
-        def on_train_end(self, trainer, pl_module):
-            _check_args(trainer, pl_module)
-            self.on_train_end_called = True
-
-        def on_validation_start(self, trainer, pl_module):
-            _check_args(trainer, pl_module)
-            self.on_validation_start_called = True
-
-        def on_validation_end(self, trainer, pl_module):
-            _check_args(trainer, pl_module)
-            self.on_validation_end_called = True
-
-        def on_test_start(self, trainer, pl_module):
-            _check_args(trainer, pl_module)
-            self.on_test_start_called = True
-
-        def on_test_end(self, trainer, pl_module):
-            _check_args(trainer, pl_module)
-            self.on_test_end_called = True
-
-    test_callback = TestCallback()
-
-    trainer_options = {
-        'callbacks': [test_callback],
-        'max_epochs': 1,
-        'val_percent_check': 0.1,
-        'train_percent_check': 0.2,
-        'progress_bar_refresh_rate': 0
-    }
-
-    assert not test_callback.on_init_start_called
-    assert not test_callback.on_init_end_called
-    assert not test_callback.on_sanity_check_start_called
-    assert not test_callback.on_sanity_check_end_called
-    assert not test_callback.on_epoch_start_called
-    assert not test_callback.on_epoch_start_called
-    assert not test_callback.on_batch_start_called
-    assert not test_callback.on_batch_end_called
-    assert not test_callback.on_validation_batch_start_called
-    assert not test_callback.on_validation_batch_end_called
-    assert not test_callback.on_test_batch_start_called
-    assert not test_callback.on_test_batch_end_called
-    assert not test_callback.on_train_start_called
-    assert not test_callback.on_train_end_called
-    assert not test_callback.on_validation_start_called
-    assert not test_callback.on_validation_end_called
-    assert not test_callback.on_test_start_called
-    assert not test_callback.on_test_end_called
-
-    # fit model
-    trainer = Trainer(**trainer_options)
-
-    assert trainer.callbacks[0] == test_callback
-    assert test_callback.on_init_start_called
-    assert test_callback.on_init_end_called
-    assert not test_callback.on_sanity_check_start_called
-    assert not test_callback.on_sanity_check_end_called
-    assert not test_callback.on_epoch_start_called
-    assert not test_callback.on_epoch_start_called
-    assert not test_callback.on_batch_start_called
-    assert not test_callback.on_batch_end_called
-    assert not test_callback.on_validation_batch_start_called
-    assert not test_callback.on_validation_batch_end_called
-    assert not test_callback.on_test_batch_start_called
-    assert not test_callback.on_test_batch_end_called
-    assert not test_callback.on_train_start_called
-    assert not test_callback.on_train_end_called
-    assert not test_callback.on_validation_start_called
-    assert not test_callback.on_validation_end_called
-    assert not test_callback.on_test_start_called
-    assert not test_callback.on_test_end_called
-
-    trainer.fit(model)
-
-    assert test_callback.on_init_start_called
-    assert test_callback.on_init_end_called
-    assert test_callback.on_sanity_check_start_called
-    assert test_callback.on_sanity_check_end_called
-    assert test_callback.on_epoch_start_called
-    assert test_callback.on_epoch_start_called
-    assert test_callback.on_batch_start_called
-    assert test_callback.on_batch_end_called
-    assert test_callback.on_validation_batch_start_called
-    assert test_callback.on_validation_batch_end_called
-    assert test_callback.on_train_start_called
-    assert test_callback.on_train_end_called
-    assert test_callback.on_validation_start_called
-    assert test_callback.on_validation_end_called
-    assert not test_callback.on_test_batch_start_called
-    assert not test_callback.on_test_batch_end_called
-    assert not test_callback.on_test_start_called
-    assert not test_callback.on_test_end_called
-
-    test_callback = TestCallback()
-    trainer_options['callbacks'] = [test_callback]
-    trainer = Trainer(**trainer_options)
-    trainer.test(model)
-
-    assert test_callback.on_test_batch_start_called
-    assert test_callback.on_test_batch_end_called
-    assert test_callback.on_test_start_called
-    assert test_callback.on_test_end_called
-    assert not test_callback.on_validation_start_called
-    assert not test_callback.on_validation_end_called
-    assert not test_callback.on_validation_batch_end_called
-    assert not test_callback.on_validation_batch_start_called
-
-
-def test_early_stopping_no_val_step(tmpdir):
-    """Test that early stopping callback falls back to training metrics when no validation defined."""
-    tutils.reset_seed()
-
-    class ModelWithoutValStep(LightTrainDataloader, TestModelBase):
-
-        def training_step(self, *args, **kwargs):
-            output = super().training_step(*args, **kwargs)
-            loss = output['loss']  # could be anything else
-            output.update({'my_train_metric': loss})
-            return output
-
-    hparams = tutils.get_default_hparams()
-    model = ModelWithoutValStep(hparams)
-
-    stopping = EarlyStopping(monitor='my_train_metric', min_delta=0.1)
-    trainer_options = dict(
+    model = BoringModel()
+    callback_mock = MagicMock()
+    trainer = Trainer(
         default_root_dir=tmpdir,
-        early_stop_callback=stopping,
-        overfit_pct=0.20,
-        max_epochs=5,
+        callbacks=[callback_mock],
+        max_epochs=1,
+        limit_val_batches=1,
+        limit_train_batches=3,
+        progress_bar_refresh_rate=0,
     )
 
+    # check that only the to calls exists
+    assert trainer.callbacks[0] == callback_mock
+    assert callback_mock.method_calls == [
+        call.on_init_start(trainer),
+        call.on_init_end(trainer),
+    ]
+
+    # fit model
+    trainer.fit(model)
+
+    assert callback_mock.method_calls == [
+        call.on_init_start(trainer),
+        call.on_init_end(trainer),
+        call.on_before_accelerator_backend_setup(trainer, model),
+        call.setup(trainer, model, 'fit'),
+        call.on_configure_sharded_model(trainer, model),
+        call.on_fit_start(trainer, model),
+        call.on_pretrain_routine_start(trainer, model),
+        call.on_pretrain_routine_end(trainer, model),
+        call.on_sanity_check_start(trainer, model),
+        call.on_validation_start(trainer, model),
+        call.on_epoch_start(trainer, model),
+        call.on_validation_epoch_start(trainer, model),
+        call.on_validation_batch_start(trainer, model, ANY, 0, 0),
+        call.on_validation_batch_end(trainer, model, ANY, ANY, 0, 0),
+        call.on_validation_epoch_end(trainer, model),
+        call.on_epoch_end(trainer, model),
+        call.on_validation_end(trainer, model),
+        call.on_sanity_check_end(trainer, model),
+        call.on_train_start(trainer, model),
+        call.on_epoch_start(trainer, model),
+        call.on_train_epoch_start(trainer, model),
+        call.on_batch_start(trainer, model),
+        call.on_train_batch_start(trainer, model, ANY, 0, 0),
+        call.on_before_zero_grad(trainer, model, trainer.optimizers[0]),
+        call.on_after_backward(trainer, model),
+        call.on_train_batch_end(trainer, model, ANY, ANY, 0, 0),
+        call.on_batch_end(trainer, model),
+        call.on_batch_start(trainer, model),
+        call.on_train_batch_start(trainer, model, ANY, 1, 0),
+        call.on_before_zero_grad(trainer, model, trainer.optimizers[0]),
+        call.on_after_backward(trainer, model),
+        call.on_train_batch_end(trainer, model, ANY, ANY, 1, 0),
+        call.on_batch_end(trainer, model),
+        call.on_batch_start(trainer, model),
+        call.on_train_batch_start(trainer, model, ANY, 2, 0),
+        call.on_before_zero_grad(trainer, model, trainer.optimizers[0]),
+        call.on_after_backward(trainer, model),
+        call.on_train_batch_end(trainer, model, ANY, ANY, 2, 0),
+        call.on_batch_end(trainer, model),
+        call.on_validation_start(trainer, model),
+        call.on_epoch_start(trainer, model),
+        call.on_validation_epoch_start(trainer, model),
+        call.on_validation_batch_start(trainer, model, ANY, 0, 0),
+        call.on_validation_batch_end(trainer, model, ANY, ANY, 0, 0),
+        call.on_validation_epoch_end(trainer, model),
+        call.on_epoch_end(trainer, model),
+        call.on_validation_end(trainer, model),
+        call.on_save_checkpoint(trainer, model),  # should take ANY but we are inspecting signature for BC
+        call.on_train_epoch_end(trainer, model, ANY),
+        call.on_epoch_end(trainer, model),
+        call.on_train_end(trainer, model),
+        call.on_fit_end(trainer, model),
+        call.teardown(trainer, model, 'fit'),
+    ]
+
+
+def test_trainer_callback_hook_system_test(tmpdir):
+    """Test the callback hook system for test."""
+
+    model = BoringModel()
+    callback_mock = MagicMock()
+    trainer = Trainer(
+        default_root_dir=tmpdir,
+        callbacks=[callback_mock],
+        max_epochs=1,
+        limit_test_batches=2,
+        progress_bar_refresh_rate=0,
+    )
+
+    trainer.test(model)
+
+    assert callback_mock.method_calls == [
+        call.on_init_start(trainer),
+        call.on_init_end(trainer),
+        call.on_before_accelerator_backend_setup(trainer, model),
+        call.setup(trainer, model, 'test'),
+        call.on_configure_sharded_model(trainer, model),
+        call.on_test_start(trainer, model),
+        call.on_epoch_start(trainer, model),
+        call.on_test_epoch_start(trainer, model),
+        call.on_test_batch_start(trainer, model, ANY, 0, 0),
+        call.on_test_batch_end(trainer, model, ANY, ANY, 0, 0),
+        call.on_test_batch_start(trainer, model, ANY, 1, 0),
+        call.on_test_batch_end(trainer, model, ANY, ANY, 1, 0),
+        call.on_test_epoch_end(trainer, model),
+        call.on_epoch_end(trainer, model),
+        call.on_test_end(trainer, model),
+        call.teardown(trainer, model, 'test'),
+    ]
+
+
+def test_trainer_callback_hook_system_validate(tmpdir):
+    """Test the callback hook system for validate."""
+
+    model = BoringModel()
+    callback_mock = MagicMock()
+    trainer = Trainer(
+        default_root_dir=tmpdir,
+        callbacks=[callback_mock],
+        max_epochs=1,
+        limit_val_batches=2,
+        progress_bar_refresh_rate=0,
+    )
+
+    trainer.validate(model)
+
+    assert callback_mock.method_calls == [
+        call.on_init_start(trainer),
+        call.on_init_end(trainer),
+        call.on_before_accelerator_backend_setup(trainer, model),
+        call.setup(trainer, model, 'validate'),
+        call.on_configure_sharded_model(trainer, model),
+        call.on_validation_start(trainer, model),
+        call.on_epoch_start(trainer, model),
+        call.on_validation_epoch_start(trainer, model),
+        call.on_validation_batch_start(trainer, model, ANY, 0, 0),
+        call.on_validation_batch_end(trainer, model, ANY, ANY, 0, 0),
+        call.on_validation_batch_start(trainer, model, ANY, 1, 0),
+        call.on_validation_batch_end(trainer, model, ANY, ANY, 1, 0),
+        call.on_validation_epoch_end(trainer, model),
+        call.on_epoch_end(trainer, model),
+        call.on_validation_end(trainer, model),
+        call.teardown(trainer, model, 'validate'),
+    ]
+
+
+# TODO: add callback tests for predict and tune
+
+
+def test_callbacks_configured_in_model(tmpdir):
+    """ Test the callback system with callbacks added through the model hook. """
+
+    model_callback_mock = Mock()
+    trainer_callback_mock = Mock()
+
+    class TestModel(BoringModel):
+
+        def configure_callbacks(self):
+            return [model_callback_mock]
+
+    model = TestModel()
+    trainer_options = dict(
+        default_root_dir=tmpdir,
+        checkpoint_callback=False,
+        fast_dev_run=True,
+        progress_bar_refresh_rate=0,
+    )
+
+    def assert_expected_calls(_trainer, model_callback, trainer_callback):
+        # some methods in callbacks configured through model won't get called
+        uncalled_methods = [
+            call.on_init_start(_trainer),
+            call.on_init_end(_trainer),
+        ]
+        for uncalled in uncalled_methods:
+            assert uncalled not in model_callback.method_calls
+
+        # assert that the rest of calls are the same as for trainer callbacks
+        expected_calls = [m for m in trainer_callback.method_calls if m not in uncalled_methods]
+        assert expected_calls
+        assert model_callback.method_calls == expected_calls
+
+    # .fit()
+    trainer_options.update(callbacks=[trainer_callback_mock])
     trainer = Trainer(**trainer_options)
-    result = trainer.fit(model)
 
-    assert result == 1, 'training failed to complete'
-    assert trainer.current_epoch < trainer.max_epochs
+    assert trainer_callback_mock in trainer.callbacks
+    assert model_callback_mock not in trainer.callbacks
+    trainer.fit(model)
+
+    assert model_callback_mock in trainer.callbacks
+    assert trainer.callbacks[-1] == model_callback_mock
+    assert_expected_calls(trainer, model_callback_mock, trainer_callback_mock)
+
+    # .test()
+    for fn in ("test", "validate"):
+        model_callback_mock.reset_mock()
+        trainer_callback_mock.reset_mock()
+
+        trainer_options.update(callbacks=[trainer_callback_mock])
+        trainer = Trainer(**trainer_options)
+
+        trainer_fn = getattr(trainer, fn)
+        trainer_fn(model)
+
+        assert model_callback_mock in trainer.callbacks
+        assert trainer.callbacks[-1] == model_callback_mock
+        assert_expected_calls(trainer, model_callback_mock, trainer_callback_mock)
 
 
-def test_model_checkpoint_with_non_string_input(tmpdir):
-    """ Test that None in checkpoint callback is valid and that chkp_path is
-        set correctly """
-    tutils.reset_seed()
+def test_configure_callbacks_hook_multiple_calls(tmpdir):
+    """ Test that subsequent calls to `configure_callbacks` do not change the callbacks list. """
+    model_callback_mock = Mock()
 
-    class CurrentTestModel(LightTrainDataloader, TestModelBase):
-        pass
+    class TestModel(BoringModel):
 
-    hparams = tutils.get_default_hparams()
-    model = CurrentTestModel(hparams)
+        def configure_callbacks(self):
+            return [model_callback_mock]
 
-    checkpoint = ModelCheckpoint(filepath=None, save_top_k=-1)
+    model = TestModel()
+    trainer = Trainer(
+        default_root_dir=tmpdir,
+        fast_dev_run=True,
+        checkpoint_callback=False,
+        progress_bar_refresh_rate=1,
+    )
 
-    trainer = Trainer(default_root_dir=tmpdir,
-                      checkpoint_callback=checkpoint,
-                      overfit_pct=0.20,
-                      max_epochs=5
-                      )
-    result = trainer.fit(model)
+    callbacks_before_fit = trainer.callbacks.copy()
+    assert callbacks_before_fit
 
-    # These should be different if the dirpath has be overridden
-    assert trainer.ckpt_path != trainer.default_root_dir
+    trainer.fit(model)
+    callbacks_after_fit = trainer.callbacks.copy()
+    assert callbacks_after_fit == callbacks_before_fit + [model_callback_mock]
+
+    for fn in ("test", "validate"):
+        trainer_fn = getattr(trainer, fn)
+        trainer_fn(model)
+
+        callbacks_after = trainer.callbacks.copy()
+        assert callbacks_after == callbacks_after_fit
+
+        trainer_fn(ckpt_path=None)
+        callbacks_after = trainer.callbacks.copy()
+        assert callbacks_after == callbacks_after_fit

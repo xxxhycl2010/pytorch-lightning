@@ -6,78 +6,124 @@
 PyTorch Lightning Documentation
 ===============================
 
+
 .. toctree::
    :maxdepth: 1
    :name: start
-   :caption: Start Here
+   :caption: Getting started
 
-   new-project
-   introduction_guide
+   starter/new-project
+   starter/converting
+   starter/rapid_prototyping_templates
+
+.. toctree::
+   :maxdepth: 1
+   :name: guides
+   :caption: Best practices
+
+   starter/style_guide
+   benchmarking/performance
+   Lightning project template<https://github.com/PyTorchLightning/pytorch-lightning-conference-seed>
+   benchmarking/benchmarks
+
+
+.. toctree::
+   :maxdepth: 2
+   :name: pl_docs
+   :caption: Lightning API
+
+   common/lightning_module
+   common/trainer
 
 .. toctree::
    :maxdepth: 2
    :name: docs
-   :caption: Python API
+   :caption: Optional extensions
 
-   callbacks
-   hooks
-   lightning-module
-   loggers
-   trainer
+   extensions/accelerators
+   extensions/callbacks
+   extensions/datamodules
+   extensions/logging
+   extensions/metrics
+   extensions/plugins
 
-.. toctree::
-   :maxdepth: 1
-   :name: Community Examples
-   :caption: Community Examples
-
-   Contextual Emotion Detection (DoubleDistilBert) <https://github.com/PyTorchLightning/emotion_transformer>
-   Generative Adversarial Network <https://colab.research.google.com/drive/1F_RNcHzTfFuQf-LeKvSlud6x7jXYkG31#scrollTo=TyYOdg8g77P0>
-   Hyperparameter optimization with Optuna <https://github.com/optuna/optuna/blob/master/examples/pytorch_lightning_simple.py>
-   Image Inpainting using Partial Convolutions <https://github.com/ryanwongsa/Image-Inpainting>
-   MNIST on TPU <https://colab.research.google.com/drive/1-_LKx4HwAxl5M6xPJmqAAu444LTDQoa3#scrollTo=BHBz1_AnamN_>
-   NER (transformers, TPU) <https://colab.research.google.com/drive/1dBN-wwYUngLYVt985wGs_OKPlK_ANB9D>
-   NeuralTexture (CVPR) <https://github.com/PyTorchLightning/neuraltexture>
-   Recurrent Attentive Neural Process <https://github.com/PyTorchLightning/attentive-neural-processes>
-   Siamese Nets for One-shot Image Recognition <https://github.com/PyTorchLightning/Siamese-Neural-Networks>
-   Speech Transformers <https://github.com/PyTorchLightning/speech-transformer-pytorch_lightning>
-   Transformers transfer learning (Huggingface) <https://colab.research.google.com/drive/1F_RNcHzTfFuQf-LeKvSlud6x7jXYkG31#scrollTo=yr7eaxkF-djf>
-   Transformers text classification <https://github.com/ricardorei/lightning-text-classification>
-   VAE Library of over 18+ VAE flavors <https://github.com/AntixK/PyTorch-VAE>
 
 .. toctree::
    :maxdepth: 1
    :name: Tutorials
    :caption: Tutorials
 
-   From PyTorch to PyTorch Lightning <https://towardsdatascience.com/from-pytorch-to-pytorch-lightning-a-gentle-introduction-b371b7caaf09>
+   starter/introduction_guide
+   PyTorch Lightning 101 class <https://www.youtube.com/playlist?list=PLaMu-SDt_RB5NUm67hU2pdE75j6KaIOv2>
+   From PyTorch to PyTorch Lightning [Blog] <https://towardsdatascience.com/from-pytorch-to-pytorch-lightning-a-gentle-introduction-b371b7caaf09>
+   From PyTorch to PyTorch Lightning [Video] <https://www.youtube.com/watch?v=QHww1JH7IDU>
+
+.. toctree::
+   :maxdepth: 2
+   :name: api
+   :caption: API References
+
+   api_references
+
+.. toctree::
+   :maxdepth: 1
+   :name: Bolts
+   :caption: Bolts
+
+   ecosystem/bolts
+
+.. toctree::
+   :maxdepth: 1
+   :name: Examples
+   :caption: Examples
+
+   ecosystem/community_examples
+   Autoencoder <https://lightning-bolts.readthedocs.io/en/latest/autoencoders.html#autoencoders>
+   BYOL <https://lightning-bolts.readthedocs.io/en/latest/self_supervised_models.html#byol>
+   DQN <https://lightning-bolts.readthedocs.io/en/latest/reinforce_learn.html#deep-q-network-dqn>
+   GAN <https://lightning-bolts.readthedocs.io/en/latest/gans.html#basic-gan>
+   GPT-2 <https://lightning-bolts.readthedocs.io/en/latest/convolutional.html#gpt-2>
+   Image-GPT <https://lightning-bolts.readthedocs.io/en/latest/convolutional.html#image-gpt>
+   SimCLR <https://lightning-bolts.readthedocs.io/en/latest/self_supervised_models.html#simclr>
+   VAE <https://lightning-bolts.readthedocs.io/en/latest/autoencoders.html#basic-vae>
 
 .. toctree::
    :maxdepth: 1
    :name: Common Use Cases
    :caption: Common Use Cases
 
-   apex
-   slurm
-   child_modules
-   debugging
-   experiment_logging
-   experiment_reporting
-   early_stopping
-   fast_training
-   hooks
-   hyperparameters
-   lr_finder
-   multi_gpu
-   multiple_loaders
-   weights_loading
-   optimizers
-   profiler
-   single_gpu
-   sequences
-   training_tricks
-   transfer_learning
-   tpu
-   test_set
+   clouds/cloud_training
+   clouds/cluster
+   advanced/amp
+   common/child_modules
+   common/debugging
+   common/loggers
+   common/early_stopping
+   common/fast_training
+   common/hyperparameters
+   common/lightning_cli
+   advanced/lr_finder
+   advanced/multi_gpu
+   advanced/advanced_gpu
+   advanced/multiple_loaders
+   common/weights_loading
+   common/optimizers
+   advanced/profiler
+   common/single_gpu
+   advanced/sequences
+   advanced/training_tricks
+   advanced/pruning_quantization
+   advanced/transfer_learning
+   advanced/tpu
+   common/test_set
+   common/production_inference
+
+.. toctree::
+   :maxdepth: 1
+   :name: Partner Domain Frameworks
+   :caption: Partner Domain Frameworks
+
+   ecosystem/asr_nlp_tts
 
 .. toctree::
    :maxdepth: 1
@@ -85,29 +131,14 @@ PyTorch Lightning Documentation
    :caption: Community
 
 
-   CODE_OF_CONDUCT.md
-   CONTRIBUTING.md
-   BECOMING_A_CORE_CONTRIBUTOR.md
-   PULL_REQUEST_TEMPLATE.md
+   generated/CODE_OF_CONDUCT.md
+   generated/CONTRIBUTING.md
+   generated/BECOMING_A_CORE_CONTRIBUTOR.md
    governance.md
+   generated/CHANGELOG.md
 
 Indices and tables
 ------------------
 
 * :ref:`genindex`
-* :ref:`modindex`
 * :ref:`search`
-
-
-
-.. This is here to make sphinx aware of the modules but not throw an error/warning
-.. toctree::
-   :hidden:
-
-   pytorch_lightning.core
-   pytorch_lightning.callbacks
-   pytorch_lightning.loggers
-   pytorch_lightning.overrides
-   pytorch_lightning.profiler
-   pytorch_lightning.trainer
-   pytorch_lightning.utilities

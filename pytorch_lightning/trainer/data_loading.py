@@ -1,149 +1,229 @@
-import platform
-from abc import ABC, abstractmethod
-from typing import Union, List, Tuple, Callable
+# Copyright The PyTorch Lightning team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import inspect
+import multiprocessing
+import os
+from abc import ABC
+from copy import deepcopy
+from functools import partial
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
-import torch.distributed as torch_distrib
-from torch.utils.data import DataLoader, RandomSampler
+from torch.utils.data import BatchSampler, DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 
+from pytorch_lightning.accelerators import Accelerator
 from pytorch_lightning.core import LightningModule
-from pytorch_lightning.utilities import rank_zero_warn
+from pytorch_lightning.overrides.distributed import IndexBatchSamplerWrapper, UnrepeatedDistributedSampler
+from pytorch_lightning.trainer.connectors.accelerator_connector import AcceleratorConnector
+from pytorch_lightning.trainer.states import RunningStage
+from pytorch_lightning.trainer.supporters import CombinedLoader
+from pytorch_lightning.utilities import _TORCH_GREATER_EQUAL_1_6, rank_zero_warn
+from pytorch_lightning.utilities.apply_func import apply_to_collection
+from pytorch_lightning.utilities.data import has_iterable_dataset, has_len
+from pytorch_lightning.utilities.debugging import InternalDebugger
 from pytorch_lightning.utilities.exceptions import MisconfigurationException
-
-try:
-    from torch.utils.data import IterableDataset
-    ITERABLE_DATASET_EXISTS = True
-except ImportError:
-    ITERABLE_DATASET_EXISTS = False
-
-try:
-    from apex import amp
-except ImportError:
-    APEX_AVAILABLE = False
-else:
-    APEX_AVAILABLE = True
-
-try:
-    import torch_xla
-    import torch_xla.core.xla_model as xm
-    import torch_xla.distributed.xla_multiprocessing as xmp
-except ImportError:
-    XLA_AVAILABLE = False
-else:
-    XLA_AVAILABLE = True
-
-try:
-    import horovod.torch as hvd
-except ImportError:
-    HOROVOD_AVAILABLE = False
-else:
-    HOROVOD_AVAILABLE = True
-
-
-def _has_len(dataloader: DataLoader) -> bool:
-    """ Checks if a given Dataloader has __len__ method implemented i.e. if
-    it is a finite dataloader or infinite dataloader """
-    try:
-        # try getting the length
-        if len(dataloader) == 0:
-            raise ValueError('Dataloader returned 0 length. Please make sure'
-                             ' that your Dataloader atleast returns 1 batch')
-        return True
-    except TypeError:
-        return False
+from pytorch_lightning.utilities.model_helpers import is_overridden
+from pytorch_lightning.utilities.seed import pl_worker_init_function
 
 
 class TrainerDataLoadingMixin(ABC):
 
     # this is just a summary on variables used in this abstract class,
     #  the proper values/initialisation should be done in child class
-    proc_rank: int
-    use_ddp: bool
-    use_ddp2: bool
-    use_horovod: bool
-    shown_warnings: ...
     val_check_interval: float
-    use_tpu: bool
     tpu_local_core_rank: int
     train_dataloader: DataLoader
     num_training_batches: Union[int, float]
-    val_check_batch: ...
-    val_dataloaders: List[DataLoader]
-    num_val_batches: Union[int, float]
-    test_dataloaders: List[DataLoader]
-    num_test_batches: Union[int, float]
-    train_percent_check: float
-    val_percent_check: float
-    test_percent_check: float
-    replace_sampler_ddp: bool
-
-    @abstractmethod
-    def is_overriden(self, *args):
-        """Warning: this is just empty shell for code implemented in other class."""
-
-    def _percent_range_check(self, name: str) -> None:
-        value = getattr(self, name)
-        msg = f'`{name}` must lie in the range [0.0, 1.0], but got {value:.3f}.'
-        if name == 'val_check_interval':
-            msg += ' If you want to disable validation set `val_percent_check` to 0.0 instead.'
-
-        if not 0. <= value <= 1.:
-            raise ValueError(msg)
+    val_check_batch: float
+    val_dataloaders: Optional[List[DataLoader]]
+    num_val_batches: List[Union[int, float]]
+    test_dataloaders: Optional[List[DataLoader]]
+    num_test_batches: List[Union[int, float]]
+    limit_train_batches: Union[int, float]
+    overfit_batches: Union[int, float]
+    distributed_sampler_kwargs: dict
+    accelerator: Accelerator
+    accelerator_connector: AcceleratorConnector
+    dev_debugger: InternalDebugger
+    call_hook: Callable
 
     def _worker_check(self, dataloader: DataLoader, name: str) -> None:
-        on_windows = platform.system() == 'Windows'
+        if not isinstance(dataloader, DataLoader):
+            return
 
-        if isinstance(dataloader, DataLoader) and dataloader.num_workers <= 2 and not on_windows:
-            rank_zero_warn(f'The dataloader, {name}, does not have many workers which may be a bottleneck.'
-                           ' Consider increasing the value of the `num_workers` argument`'
-                           ' in the `DataLoader` init to improve performance.')
+        using_spawn = self.accelerator_connector.distributed_backend == "ddp_spawn"
+        num_cpus = multiprocessing.cpu_count()
 
-    def auto_add_sampler(self, dataloader: DataLoader, train: bool) -> DataLoader:
+        # ddp_spawn + num_workers > 0 don't mix! tell the user
+        if dataloader.num_workers > 0 and using_spawn:
+            # checks for the attr persistent_workers available in pytorch >= 1.7
+            if hasattr(dataloader, "persistent_workers"):
+                if not dataloader.persistent_workers:
+                    rank_zero_warn(
+                        'num_workers>0, persistent_workers=False, and accelerator=ddp_spawn'
+                        ' may result in data loading bottlenecks.'
+                        ' Consider setting persistent_workers=True'
+                        ' (this is a limitation of Python .spawn() and PyTorch)'
+                    )
+            else:
+                rank_zero_warn(
+                    'num_workers>0 and accelerator=ddp_spawn do not mix well'
+                    ' and may result in data loading bottlenecks.'
+                    ' Consider setting accelerator=ddp to use num_workers>0'
+                    ' (this is a limitation of Python .spawn() and PyTorch)'
+                )
 
+        elif dataloader.num_workers == 0 and using_spawn:
+            # checks for the attr persistent_workers available in pytorch >= 1.7
+            if hasattr(dataloader, "persistent_workers"):
+                if not dataloader.persistent_workers:
+                    rank_zero_warn(
+                        'accelerator=ddp_spawn and num_workers=0 may result in data loading bottlenecks.'
+                        ' Consider setting num_workers>0 and persistent_workers=True'
+                    )
+            else:
+                rank_zero_warn(
+                    'accelerator=ddp_spawn and num_workers=0 may result in data loading bottlenecks.'
+                    ' Consider setting accelerator=ddp and set num_workers>0'
+                )
+
+        elif dataloader.num_workers <= 2 < num_cpus and not using_spawn:
+            rank_zero_warn(
+                f'The dataloader, {name}, does not have many workers which may be a bottleneck.'
+                ' Consider increasing the value of the `num_workers` argument`'
+                f' (try {num_cpus} which is the number of cpus on this machine)'
+                f' in the `DataLoader` init to improve performance.'
+            )
+
+    def auto_add_worker_init_fn(self, dataloader: DataLoader) -> None:
+        if int(os.environ.get("PL_SEED_WORKERS", 0)) and dataloader.worker_init_fn is None:
+            dataloader.worker_init_fn = partial(pl_worker_init_function, rank=self.global_rank)
+
+    def auto_add_sampler(
+        self, dataloader: DataLoader, shuffle: bool, mode: Optional[RunningStage] = None
+    ) -> DataLoader:
         # don't do anything if it's not a dataloader
-        # don't manipulate iterable datasets
         is_dataloader = isinstance(dataloader, DataLoader)
+        # don't manipulate iterable datasets
+        is_iterable_ds = has_iterable_dataset(dataloader)
 
-        is_iterable_ds = False
-        if ITERABLE_DATASET_EXISTS and hasattr(dataloader, 'dataset'):
-            is_iterable_ds = isinstance(dataloader.dataset, IterableDataset)
+        if isinstance(dataloader, CombinedLoader):
+            dataloader.loaders = apply_to_collection(dataloader.loaders, DataLoader, self.auto_add_sampler, shuffle)
+            return dataloader
 
         if not is_dataloader or is_iterable_ds:
             return dataloader
-        need_dist_sampler = (self.use_ddp or self.use_ddp2 or self.use_horovod or self.use_tpu)
-        if self.replace_sampler_ddp and need_dist_sampler:
 
-            skip_keys = ['sampler', 'batch_sampler', 'dataset_kind']
-
-            dl_args = {
-                k: v for k, v in dataloader.__dict__.items() if not k.startswith('_') and k not in skip_keys
-            }
-
-            if self.use_tpu:
-                sampler = DistributedSampler(
-                    dataloader.dataset,
-                    num_replicas=xm.xrt_world_size(),
-                    rank=xm.get_ordinal(),
-                )
-            elif self.use_horovod:
-                sampler = DistributedSampler(dataloader.dataset,
-                                             num_replicas=hvd.size(),
-                                             rank=hvd.rank())
-            else:
-                world_size = {
-                    'ddp': self.num_nodes * self.num_processes,
-                    'ddp2': self.num_nodes,
-                }
-                sampler = DistributedSampler(
-                    dataloader.dataset,
-                    num_replicas=world_size.get(self.distributed_backend, 0),
-                    rank=self.proc_rank,
+        need_dist_sampler = self.accelerator_connector.is_distributed and not isinstance(
+            dataloader.sampler, DistributedSampler
+        )
+        if self.accelerator_connector.replace_sampler_ddp and need_dist_sampler:
+            if not isinstance(dataloader.sampler, (SequentialSampler, RandomSampler)):
+                raise MisconfigurationException(
+                    'You seem to have configured a sampler in your DataLoader. This will be replaced '
+                    ' by `DistributedSampler` since `replace_sampler_ddp` is True and you are using'
+                    ' distributed training. Either remove the sampler from your DataLoader or set'
+                    ' `replace_sampler_ddp`=False if you want to use your custom sampler.'
                 )
 
-            dl_args['sampler'] = sampler
-            dataloader = type(dataloader)(**dl_args)
+            # replace with distributed sampler
+            sampler = self._get_distributed_sampler(dataloader, shuffle, mode=mode)
+            dataloader = self.replace_sampler(dataloader, sampler, mode=mode)
 
         return dataloader
+
+    @staticmethod
+    def _resolve_batch_sampler(dl_args, dataloader, sampler, mode: Optional[RunningStage] = None) -> Dict[str, Any]:
+        batch_sampler = getattr(dataloader, "batch_sampler")
+        is_predicting = mode == RunningStage.PREDICTING
+        # checking the batch sampler type is different than PyTorch default.
+        if (batch_sampler is not None and type(batch_sampler) is not BatchSampler) or is_predicting:
+            batch_sampler = type(batch_sampler)(
+                sampler,
+                batch_size=batch_sampler.batch_size,
+                drop_last=(False if is_predicting else batch_sampler.drop_last),
+            )
+            if is_predicting:
+                batch_sampler = IndexBatchSamplerWrapper(batch_sampler)
+            dl_args['batch_sampler'] = batch_sampler
+            dl_args['batch_size'] = 1
+            dl_args['shuffle'] = False
+            dl_args['sampler'] = None
+            dl_args['drop_last'] = False
+        else:
+            dl_args['sampler'] = sampler
+            dl_args['shuffle'] = False
+            dl_args['batch_sampler'] = None
+
+        return dl_args
+
+    def replace_sampler(self, dataloader: DataLoader, sampler, mode: Optional[RunningStage] = None) -> DataLoader:
+        skip_keys = ('sampler', 'batch_sampler', 'dataset_kind')
+        skip_signature_keys = ('args', 'kwargs', 'self')
+
+        attrs = {k: v for k, v in vars(dataloader).items() if not k.startswith("_")}
+
+        params = set(inspect.signature(dataloader.__init__).parameters)
+        contains_dataset = True
+
+        if type(dataloader) is not DataLoader:
+            contains_dataset = "dataset" in params
+            params.update(inspect.signature(DataLoader.__init__).parameters)
+
+        dl_args = {name: attrs[name] for name in params if name in attrs and name not in skip_keys}
+
+        dl_args = self._resolve_batch_sampler(dl_args, dataloader, sampler, mode=mode)
+
+        multiprocessing_context = dataloader.multiprocessing_context
+        dl_args['multiprocessing_context'] = multiprocessing_context
+
+        missing_kwargs = params.difference(skip_signature_keys).difference(dl_args)
+        if missing_kwargs:
+            """
+            Example:
+            class CustomDataLoader(DataLoader):
+                def __init__(self, num_features, dataset, *args, **kwargs):
+                    self.num_features = num_features
+                    super().__init__(dataset, *args, **kwargs)
+            """
+            dataloader_cls_name = dataloader.__class__.__name__
+            raise MisconfigurationException(
+                f"Trying to inject DistributedSampler within {dataloader_cls_name} class."
+                "This would fail as your DataLoader doesn't expose all its __init__ parameters as attributes. "
+                f"Missing attributes are {missing_kwargs}. "
+                f"HINT: If you wrote the {dataloader_cls_name} class, add the `__init__` arguments as attributes or ",
+                "manually add DistributedSampler as "
+                f"{dataloader_cls_name}(dataset, ..., sampler=DistributedSampler(dataset, ...)).",
+            )
+
+        if not contains_dataset:
+            dl_args.pop('dataset')
+
+        dataloader = type(dataloader)(**dl_args)
+        dataloader.multiprocessing_context = multiprocessing_context
+        return dataloader
+
+    def _get_distributed_sampler(
+        self, dataloader: DataLoader, shuffle: bool, mode: Optional[RunningStage] = None
+    ) -> DistributedSampler:
+        kwargs = self.distributed_sampler_kwargs
+        kwargs["shuffle"] = shuffle and not self.overfit_batches
+        if _TORCH_GREATER_EQUAL_1_6:
+            kwargs.setdefault("seed", int(os.getenv("PL_GLOBAL_SEED", 0)))
+        cls = UnrepeatedDistributedSampler if mode == RunningStage.PREDICTING else DistributedSampler
+        sampler = cls(dataloader.dataset, **kwargs)
+        return sampler
 
     def reset_train_dataloader(self, model: LightningModule) -> None:
         """Resets the train dataloader and initialises required variables
@@ -152,22 +232,47 @@ class TrainerDataLoadingMixin(ABC):
         Args:
             model: The current `LightningModule`
         """
-        self.train_dataloader = self.request_dataloader(model.train_dataloader)
+        self.train_dataloader = self.request_dataloader(model, "train")
 
-        self.num_training_batches = 0
+        if self.overfit_batches > 0:
+            if hasattr(self.train_dataloader, 'sampler') and isinstance(self.train_dataloader.sampler, RandomSampler):
+                rank_zero_warn(
+                    'You requested to overfit but enabled training dataloader shuffling.'
+                    ' We are turning off the training dataloader shuffling for you.'
+                )
+                self.train_dataloader = self.replace_sampler(
+                    self.train_dataloader, SequentialSampler(self.train_dataloader.dataset)
+                )
+
+        # debugging
+        self.dev_debugger.track_load_dataloader_call('train_dataloader', dataloaders=[self.train_dataloader])
 
         # automatically add samplers
-        self.train_dataloader = self.auto_add_sampler(self.train_dataloader, train=True)
+        self.train_dataloader = apply_to_collection(
+            self.train_dataloader, DataLoader, self.auto_add_sampler, shuffle=True
+        )
 
-        self._worker_check(self.train_dataloader, 'train dataloader')
-        self._percent_range_check('train_percent_check')
+        # check the workers recursively
+        apply_to_collection(self.train_dataloader, DataLoader, self._worker_check, 'train dataloader')
 
-        if not _has_len(self.train_dataloader):
-            self.num_training_batches = float('inf')
-        else:
-            # try getting the length
-            self.num_training_batches = len(self.train_dataloader)
-            self.num_training_batches = int(self.num_training_batches * self.train_percent_check)
+        # add worker_init_fn for correct seeding in worker processes
+        apply_to_collection(self.train_dataloader, DataLoader, self.auto_add_worker_init_fn)
+
+        # wrap the sequence of train loaders to a CombinedLoader object for computing the num_training_batches
+        self.train_dataloader = CombinedLoader(self.train_dataloader, self.data_connector.multiple_trainloader_mode)
+
+        self.num_training_batches = len(self.train_dataloader) if has_len(self.train_dataloader) else float('inf')
+
+        if isinstance(self.limit_train_batches, int) or self.limit_train_batches == 0.0:
+            self.num_training_batches = min(self.num_training_batches, int(self.limit_train_batches))
+        elif self.num_training_batches != float('inf'):
+            self.num_training_batches = int(self.num_training_batches * self.limit_train_batches)
+        elif self.limit_train_batches != 1.0:
+            raise MisconfigurationException(
+                'When using an IterableDataset for `limit_train_batches`,'
+                ' `Trainer(limit_train_batches)` must be `0.0`, `1.0` or an int. An int k specifies'
+                ' `num_training_batches` to use.'
+            )
 
         # determine when to check validation
         # if int passed in, val checks that often
@@ -178,71 +283,119 @@ class TrainerDataLoadingMixin(ABC):
                 raise ValueError(
                     f'`val_check_interval` ({self.val_check_interval}) must be less than or equal '
                     f'to the number of the training batches ({self.num_training_batches}). '
-                    'If you want to disable validation set `val_percent_check` to 0.0 instead.')
+                    'If you want to disable validation set `limit_val_batches` to 0.0 instead.'
+                )
         else:
-            if not _has_len(self.train_dataloader):
+            if not has_len(self.train_dataloader):
                 if self.val_check_interval == 1.0:
                     self.val_check_batch = float('inf')
                 else:
                     raise MisconfigurationException(
-                        'When using an infinite DataLoader (e.g. with an IterableDataset or when '
-                        'DataLoader does not implement `__len__`) for `train_dataloader`, '
-                        '`Trainer(val_check_interval)` must be `1.0` or an int. An int k specifies '
-                        'checking validation every k training batches.')
+                        'When using an IterableDataset for `train_dataloader`,'
+                        ' `Trainer(val_check_interval)` must be `1.0` or an int. An int k specifies'
+                        ' checking validation every k training batches.'
+                    )
             else:
-                self._percent_range_check('val_check_interval')
-
                 self.val_check_batch = int(self.num_training_batches * self.val_check_interval)
                 self.val_check_batch = max(1, self.val_check_batch)
 
-    def _reset_eval_dataloader(self, model: LightningModule, mode: str) -> Tuple[int, List[DataLoader]]:
+    def _reset_eval_dataloader(
+        self,
+        model: LightningModule,
+        mode: str,
+    ) -> Tuple[List[Union[int, float]], List[DataLoader]]:
         """Generic method to reset a dataloader for evaluation.
 
         Args:
             model: The current `LightningModule`
-            mode: Either `'val'` or `'test'`
+            mode: Either `'val'`, `'test'` or `'predict'`
 
         Returns:
             Tuple (num_batches, dataloaders)
         """
-        dataloaders = self.request_dataloader(getattr(model, f'{mode}_dataloader'))
+        # always get the loaders first so we can count how many there are
+        loader_name = f'{mode}_dataloader'
+        dataloaders = self.request_dataloader(model, mode)
 
         if not isinstance(dataloaders, list):
             dataloaders = [dataloaders]
 
-        # shuffling in val and test set is bad practice
-        for loader in dataloaders:
-            if mode in ('val', 'test') and hasattr(loader, 'sampler') and isinstance(loader.sampler, RandomSampler):
-                raise MisconfigurationException(
-                    f'Your {mode}_dataloader has shuffle=True, it is best practice to turn'
-                    ' this off for validation and test dataloaders.')
+        # when overfitting use the training loader as val and test
+        # duplicate it the numb of times needed to match the train loaders
+        if self.overfit_batches > 0:
+            num_loaders = len(dataloaders)
+            train_dataloader = self.request_dataloader(model, 'train')
+            dataloaders = [deepcopy(train_dataloader) for _ in range(num_loaders)]
+
+        self.dev_debugger.track_load_dataloader_call(loader_name, dataloaders=dataloaders)
+
+        for loader_i in range(len(dataloaders)):
+            loader = dataloaders[loader_i]
+
+            # shuffling in val and test set is bad practice
+            modes = ('val', 'test', 'predict')
+            if mode in modes and hasattr(loader, 'sampler') and isinstance(loader.sampler, RandomSampler):
+
+                # when overfitting, the dataloader should not have sampler
+                if self.overfit_batches > 0 and mode != 'predict':
+                    rank_zero_warn(
+                        'You requested to overfit but enabled val/test dataloader shuffling.'
+                        ' We are turning it off for you.'
+                    )
+                    dataloaders[loader_i] = self.replace_sampler(loader, SequentialSampler(loader.dataset))
+
+                else:
+                    rank_zero_warn(
+                        f'Your {mode}_dataloader has `shuffle=True`, it is best practice to turn'
+                        ' this off for val/test/predict dataloaders.'
+                    )
+
+        if any([dl is None for dl in dataloaders]):
+            rank_zero_warn("One of given dataloaders is None and it will be skipped.")
 
         # add samplers
-        dataloaders = [self.auto_add_sampler(dl, train=False) for dl in dataloaders if dl]
+        dataloaders = [
+            self.auto_add_sampler(dl, shuffle=False, mode=self.state.stage) for dl in dataloaders if dl is not None
+        ]
 
-        num_batches = 0
+        # add worker_init_fn for correct seeding in worker processes
+        apply_to_collection(dataloaders, dtype=DataLoader, function=self.auto_add_worker_init_fn)
+
+        loader_num_batches = []
 
         # determine number of batches
         # datasets could be none, 1 or 2+
         if len(dataloaders) != 0:
             for i, dataloader in enumerate(dataloaders):
+                num_batches = len(dataloader) if has_len(dataloader) else float('inf')
                 self._worker_check(dataloader, f'{mode} dataloader {i}')
-                if not _has_len(dataloader):
-                    num_batches = float('inf')
 
-            percent_check = getattr(self, f'{mode}_percent_check')
+                # percent or num_steps
+                limit_eval_batches = getattr(self, f'limit_{mode}_batches')
 
-            if num_batches != float('inf'):
-                self._percent_range_check(f'{mode}_percent_check')
+                # limit num batches either as a percent or num steps
+                if isinstance(limit_eval_batches, int) or limit_eval_batches == 0.0:
+                    num_batches = min(num_batches, int(limit_eval_batches))
+                elif num_batches != float('inf'):
+                    num_batches = int(num_batches * limit_eval_batches)
+                elif limit_eval_batches != 1.0:
+                    raise MisconfigurationException(
+                        'When using an IterableDataset for `limit_{mode}_batches`,'
+                        f' `Trainer(limit_{mode}_batches)` must be `0.0`, `1.0` or an int. An int k specifies'
+                        f' `num_{mode}_batches` to use.'
+                    )
 
-                num_batches = sum(len(dataloader) for dataloader in dataloaders)
-                num_batches = int(num_batches * percent_check)
-            elif percent_check not in (0.0, 1.0):
-                raise MisconfigurationException(
-                    'When using an infinite DataLoader (e.g. with an IterableDataset or when '
-                    f'DataLoader does not implement `__len__`) for `{mode}_dataloader`, '
-                    f'`Trainer({mode}_percent_check)` must be `0.0` or `1.0`.')
-        return num_batches, dataloaders
+                if num_batches == 0 and limit_eval_batches > 0.0 and isinstance(limit_eval_batches, float):
+                    min_pct = 1.0 / len(dataloader)
+                    raise MisconfigurationException(
+                        f'you requested to check {limit_eval_batches} of the {mode} dataloader but'
+                        f' {limit_eval_batches}*{num_batches} < 1. Please increase the limit_{mode}_batches.'
+                        f' Try at least limit_{mode}_batches={min_pct}'
+                    )
+
+                loader_num_batches.append(num_batches)
+
+        return loader_num_batches, dataloaders
 
     def reset_val_dataloader(self, model: LightningModule) -> None:
         """Resets the validation dataloader and determines the number of batches.
@@ -250,21 +403,33 @@ class TrainerDataLoadingMixin(ABC):
         Args:
             model: The current `LightningModule`
         """
-        if self.is_overriden('validation_step'):
-            self.num_val_batches, self.val_dataloaders =\
-                self._reset_eval_dataloader(model, 'val')
+        has_loader = is_overridden('val_dataloader', model)
+        has_step = is_overridden('validation_step', model)
+        if has_loader and has_step:
+            self.num_val_batches, self.val_dataloaders = self._reset_eval_dataloader(model, 'val')
 
     def reset_test_dataloader(self, model) -> None:
-        """Resets the validation dataloader and determines the number of batches.
+        """Resets the test dataloader and determines the number of batches.
 
         Args:
             model: The current `LightningModule`
         """
-        if self.is_overriden('test_step'):
-            self.num_test_batches, self.test_dataloaders =\
-                self._reset_eval_dataloader(model, 'test')
+        has_loader = is_overridden('test_dataloader', model)
+        has_step = is_overridden('test_step', model)
+        if has_loader and has_step:
+            self.num_test_batches, self.test_dataloaders = self._reset_eval_dataloader(model, 'test')
 
-    def request_dataloader(self, dataloader_fx: Callable) -> DataLoader:
+    def reset_predict_dataloader(self, model) -> None:
+        """Resets the predict dataloader and determines the number of batches.
+
+        Args:
+            model: The current `LightningModule`
+        """
+        has_loader = is_overridden('predict_dataloader', model)
+        if has_loader:
+            self.num_predict_batches, self.predict_dataloaders = self._reset_eval_dataloader(model, 'predict')
+
+    def request_dataloader(self, model: LightningModule, stage: str) -> DataLoader:
         """Handles downloading data in the GPU or TPU case.
 
         Args:
@@ -273,36 +438,19 @@ class TrainerDataLoadingMixin(ABC):
         Returns:
             The dataloader
         """
-        dataloader = dataloader_fx()
-
-        # get the function we'll use to get data
-        if self.use_ddp or self.use_ddp2:
-            # all processes wait until data download has happened
-            torch_distrib.barrier()
-
-        # data download/load on TPU
-        elif self.use_tpu and XLA_AVAILABLE:
-            # all processes wait until data download has happened
-            torch_xla.core.xla_model.rendezvous('pl.TrainerDataLoadingMixin.get_dataloaders')
-
-        elif self.use_horovod:
-            # all processes wait until data download has happened
-            hvd.join()
-
+        self.call_hook(f"on_{stage}_dataloader")
+        dataloader: DataLoader = getattr(model, f'{stage}_dataloader')()
+        dataloader = self._flatten_dl_only(dataloader)
+        self.accelerator.barrier('get_dataloaders')
         return dataloader
 
-    def determine_data_use_amount(self, train_percent_check: float, val_percent_check: float,
-                                  test_percent_check: float, overfit_pct: float) -> None:
-        """Use less data for debugging purposes
-        """
-        self.train_percent_check = train_percent_check
-        self.val_percent_check = val_percent_check
-        self.test_percent_check = test_percent_check
-        if overfit_pct > 0:
-            if overfit_pct > 1:
-                raise ValueError(
-                    f'`overfit_pct` must be not greater than 1.0, but got {overfit_pct:.3f}.')
+    def _flatten_dl_only(self, dataloaders):
+        # handles user error when they return:
+        # return dl1, dl2  vs  return (dl1, dl2)
+        if isinstance(dataloaders, tuple):
+            all_dls = [isinstance(x, Iterable) for x in dataloaders]
+            all_dls = all(all_dls)
+            if all_dls:
+                dataloaders = list(dataloaders)
 
-            self.train_percent_check = overfit_pct
-            self.val_percent_check = overfit_pct
-            self.test_percent_check = overfit_pct
+        return dataloaders
